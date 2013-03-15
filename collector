@@ -1,0 +1,182 @@
+#!/usr/bin/php
+<?php
+/**
+ * collector
+ * 標準入力を受け、それを標準出力に出力する。
+ * 指定された期間内に受けた入力はプールされ、次回に取りまとめて出力される。
+ * 1時間に1回しかエラーを送らないで欲しいといった用途に使われる。
+ * 
+ * オプション：
+ *  [-h]		ヘルプを表示する。
+ *  [-t 整数]	ここで指定された期間だけ取りまとめが行われる。単位は秒。
+ * 
+ * @package		collector
+ * @author		松井 健太郎 (Kentaro Matsui) <info@ke-tai.org>
+ * @copyright	ke-tai.org
+ * @license		BSD
+ */
+
+/**
+ * TODO ファイル入力の効率化
+ * 現状ソート順を自由にできるなど利便性のためにファイルの中身をJSONとして展開しているが、ファイルサイズが大きい場合かなりの負荷となる。必要に応じてテキストの追記のみで処理できるように修正する。
+ */
+
+$col = new Collector();
+$col->run($argv);
+
+
+/**
+ * Collectorクラス
+ */
+class Collector
+{
+	protected $usage = "Usage: COMMAND [ARG]... | collector -k KEY_STRING [-t INTERVALIC TIME]\n";
+	protected $parameters = array('t:', 'k:', 'h');
+	protected $tmp_dir = '/tmp';
+	protected $tmp_prefix = 'collector_';
+	protected $default_intervalic_time = 3600;
+	protected $split_string = "==> Y-m-d H:i:s <==\n";
+
+	/**
+	 * コンストラクタ
+	 * @param array $config 設定を格納した連想配列
+	 */
+	public function __construct($config = array())
+	{
+		// configで指定された設定でクラス変数を上書き
+		foreach ($config as $key => $val) {
+			$this->$key = $val;
+		}
+	}
+
+	/**
+	 * 実行
+	 * @param array $argv コマンドライン引数を格納した配列
+	 */
+	public function run($argv)
+	{
+		try {
+			// オプションのデフォルト値を設定
+			$key_string = '';
+			$intervalic_time = $this->default_intervalic_time;
+
+			// オプションの解析
+			$opt_arr = getopt(implode('', $this->parameters));
+			if (isset($opt_arr['k']) and !is_array($opt_arr['k'])) {
+				$key_string = $opt_arr['k'];
+			}
+			if (isset($opt_arr['t']) and !is_array($opt_arr['t'])) {
+				$intervalic_time = intval($opt_arr['t']);
+			}
+			if (isset($opt_arr['h']) or '' == $key_string) {
+				// ヘルプ指定またはオプション不備
+				echo $this->usage;
+				exit(0);
+			}
+
+			// 標準入力を取得
+			$stdin = file_get_contents('php://stdin');
+			if ('' == $stdin) {
+				// 標準入力が空なら何もしない
+				exit(0);
+			}
+
+			// キーからハッシュ文字列を生成し、ファイル名を決定
+			$file_name = $this->tmp_dir . '/' . $this->tmp_prefix . md5($key_string);
+
+			// ファイルのタイムスタンプを取得
+			if (file_exists($file_name)) {
+				$read_data = $this->readTmpFile($file_name);
+				if (isset($read_data[0]['timestamp'])) {
+					$timestamp = $read_data[0]['timestamp'];		// 一番古い出力プールを基準時間とする
+				} else {
+					$timestamp = filemtime($file_name);				// 空ファイルの場合はタイムスタンプを基準時間とする
+				}
+			} else {
+				$timestamp = 0;		// 遠く過去の時刻をセットすることで適切な処理が行われるようにする
+			}
+
+			// テンポラリに保存するデータを初期化
+			$save_data = array();
+
+			// 出力するかどうかを判定
+			if ($timestamp + $intervalic_time <= time()) {
+				// 出力する
+				if (isset($read_data)) {
+					// テンポラリファイルがある場合はそれを出力
+					foreach ($read_data as $value) {
+						print date($this->split_string, $value['timestamp']);
+						print $value['content'];
+					}
+
+					// テンポラリファイルを削除する
+					unlink($file_name);
+				}
+
+				// 今回の内容を出力
+				print date($this->split_string);
+				print $stdin;
+			} else {
+				// 出力内容をプールする
+				$add_data = array('timestamp' => time(), 'content' => $stdin);
+
+				// 要素の最後に今回の分を付け足す
+				if (isset($read_data)) {
+					$save_data = $read_data;
+				}
+				$save_data[] = $add_data;
+			}
+
+			// ファイルを書き出し
+			if (!$this->putTmpFile($file_name, $save_data)) {
+				throw new Exception('file output error.');
+			}
+		} catch (Exception $e) {
+			// エラーの場合、標準エラーに出力して終了
+			fputs(STDERR, 'collector: ' . $e->getMessage() . "\n");
+			exit(1);
+		}
+	}
+
+	/**
+	 * テンポラリファイル内のデータを取得する
+	 * @param string $file_name テンポラリファイル名
+	 * @return class 読み込んだファイル内のデータを格納したJSONクラス
+	 */
+	protected function readTmpFile($file_name)
+	{
+		if (file_exists($file_name)) {
+			// 既にファイルがある場合
+			$ret_data = json_decode(file_get_contents($file_name), true);
+		} else {
+			// ファイルが無い場合
+			$ret_data = null;
+		}
+
+		return $ret_data;
+	}
+
+	/**
+	 * テンポラリファイルへのデータ出力
+	 * @param string $file_name テンポラリファイル名
+	 * @param string $data 出力データ
+	 * @return bool 成否
+	 */
+	protected function putTmpFile($file_name, $data)
+	{
+		// ファイルに出力
+		$fp = fopen($file_name, 'w');		// 書き込みモードでファイルをオープン
+		if ((empty($fp))) {
+			// 書き込みエラー
+			return false;
+		}
+
+		// データの書き出し
+		flock($fp, LOCK_EX);
+		fputs($fp, json_encode($data));
+		flock($fp, LOCK_UN);
+		fclose($fp);
+
+		return true;
+	}
+}
