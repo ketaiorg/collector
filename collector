@@ -76,10 +76,6 @@ class Collector
 
 			// 標準入力を取得
 			$stdin = file_get_contents('php://stdin');
-			if ('' == $stdin) {
-				// 標準入力が空なら何もしない
-				exit(0);
-			}
 
 			// キーからハッシュ文字列を生成し、ファイル名を決定
 			$file_name = $this->tmp_dir . '/' . $this->tmp_prefix . md5($key_string);
@@ -106,7 +102,7 @@ class Collector
 					// テンポラリファイルがある場合はそれを出力
 					foreach ($read_data as $value) {
 						print date($this->split_string, $value['timestamp']);
-						print $value['content'];
+						print $value['content'] . "\n";
 					}
 
 					// テンポラリファイルを削除する
@@ -114,13 +110,19 @@ class Collector
 				}
 
 				// 今回の内容を出力
-				print date($this->split_string);
-				print $stdin;
+				if ('' != $stdin) {
+					print date($this->split_string);
+					print $stdin . "\n";
+				}
 			} else {
 				// 出力内容をプールする
-				$add_data = array('timestamp' => time(), 'content' => $stdin);
+				if ('' == $stdin) {
+					// ただし標準入力がない場合は、プールしても仕方がないので終了
+					exit(0);
+				}
 
 				// 要素の最後に今回の分を付け足す
+				$add_data = array('timestamp' => time(), 'content' => $stdin);
 				if (isset($read_data)) {
 					$save_data = $read_data;
 				}
